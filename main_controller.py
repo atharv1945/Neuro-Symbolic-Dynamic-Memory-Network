@@ -16,6 +16,7 @@ from modules.utils import logger, recover_previous_state, setup_logger
 from modules.memory_store import SharedMemoryManager
 from modules.brain import NeuralBrain
 from modules.dreamer import MemoryDreamer
+from modules.ingestor import WindBellIngestor
 
 stop_event = threading.Event()
 dreamer_thread = None
@@ -57,10 +58,14 @@ def main():
     print("[Init] Initializing Neural Brain (CPU Cortex)...")
     brain = NeuralBrain(memory_manager, stm_queue)
     
+    print("[Init] Initializing Ingestion Engine (Wind-Bell)...")
+    ingestor = WindBellIngestor(memory_manager, brain.encoder)
+    
     print("[Init] Connecting to Ollama (GPU Cortex)...")
     LLM_MODEL = "llama3" 
     
     print("\nSystem Online. Type 'exit' or 'quit' to stop.")
+    print("Commands: /ingest <path_to_pdf>")
     
     while not stop_event.is_set():
         try:
@@ -70,7 +75,18 @@ def main():
                 continue
                 
             if user_input.lower() in ["exit", "quit", "bye"]:
-                raise KeyboardInterrupt 
+                raise KeyboardInterrupt
+            
+            # --- Ingestion Command ---
+            if user_input.startswith("/ingest"):
+                parts = user_input.split(" ", 1)
+                if len(parts) < 2:
+                    print("[System] Usage: /ingest <path_to_file>")
+                    continue
+                file_path = parts[1].strip().strip('"')
+                print(f"[System] Ingesting: {file_path}")
+                ingestor.ingest_document(file_path)
+                continue
             
             start_t = time.time()
             final_prompt_context = brain.process_query(user_input)

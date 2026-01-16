@@ -18,6 +18,7 @@ from config import (
 )
 from modules.utils import logger
 from modules.memory_store import SharedMemoryManager
+from modules.reasoner import CognitiveRouter
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -28,6 +29,8 @@ class NeuralBrain:
     def __init__(self, memory_manager: SharedMemoryManager, stm_queue: queue.Queue):
         self.memory = memory_manager
         self.stm_queue = stm_queue
+        # Initialize Reasoner
+        self.router = CognitiveRouter(model_name="llama3")
         
         if SentenceTransformer:
             logger.info(f"Initializing Embedding Model ({EMBEDDING_MODEL_NAME})...")
@@ -62,31 +65,57 @@ class NeuralBrain:
                 return False
         return True
 
-    def route_query(self, query: str) -> str:
-        graph_triggers = ["compare", "relationship", "connection", "between", "how does", "link"]
-        query_lower = query.lower()
-        for trigger in graph_triggers:
-            if trigger in query_lower:
-                return 'graph'
-        return 'vector'
-
-    def retrieve_context(self, query: str, vector_embedding: np.ndarray) -> List[str]:
-        strategy = self.route_query(query)
-        logger.info(f"Routing Strategy: {strategy}")
+    def retrieve_context(self, query: str, vector_embedding: np.ndarray, strategy: str = 'vector') -> List[str]:
         context_docs = []
         
-        # 1. Vector Search
+        # 1. Vector Search (Always done to find entry points)
         hits = self.memory.query_similarity(vector_embedding, top_k=5)
-        for uuid, score in hits:
+        
+        # Collect distinct UUIDs from hits
+        hit_uuids = [uuid for uuid, score in hits]
+        
+        # Basic content from hits
+        for uuid in hit_uuids:
              content = self.memory.get_node_content(uuid)
              if content:
-                 context_docs.append(content)
+                 context_docs.append(f"[Vector Match]: {content}")
                  
-        # 2. Graph Traversal (Placeholder)
-        if strategy == 'graph':
-            pass 
+        # 2. Graph Traversal
+        if strategy in ['graph', 'hybrid']:
+            graph_context = self.retrieve_graph_context(hit_uuids)
+            context_docs.extend(graph_context)
                 
         return list(set(context_docs))
+
+    def retrieve_graph_context(self, entry_uuids: List[str]) -> List[str]:
+        """
+        Retrieves 1-hop neighbors for the given entry nodes.
+        """
+        graph_docs = []
+        visited = set(entry_uuids)
+        
+        with self.memory.lock:
+            for uuid in entry_uuids:
+                if self.memory.graph.has_node(uuid):
+                    # Get neighbors
+                    neighbors = list(self.memory.graph.neighbors(uuid))
+                    for neighbor_id in neighbors:
+                        if neighbor_id not in visited:
+                            # Get edge data (relation)
+                            edge_data = self.memory.graph.get_edge_data(uuid, neighbor_id)
+                            relation = edge_data.get('relation', 'related_to')
+                            
+                            # Get neighbor content
+                            neighbor_content = self.memory.get_node_content(neighbor_id)
+                            
+                            # Format: Node --relation--> Neighbor
+                            # We might need the source node text too to make sense
+                            # Simplifying: just adding neighbor text with relation note
+                            if neighbor_content:
+                                graph_docs.append(f"[Graph Link: {relation}] {neighbor_content}")
+                            
+                            visited.add(neighbor_id)
+        return graph_docs
 
     def compress_context(self, context: List[str], query: str) -> str:
         if not context:
@@ -113,28 +142,37 @@ class NeuralBrain:
         if not self.check_safety(query):
             return "Error: Unsafe Query Detected."
             
+        # 1. Reasoner Step
+        refined_query, route, thought = self.router.analyze_query(query)
+        logger.info(f"Reasoner: {dict(thought=thought, route=route)}")
+        print(f"[Brain] Inner Monologue: {thought}")
+        print(f"[Brain] Routing: {route.upper()} | Refined Query: {refined_query}")
+            
         vector_embedding = None
         if self.encoder:
             try:
-                vector_embedding = self.encoder.encode(query)
-                # Ensure it's numpy for safe downstream reshaping
+                vector_embedding = self.encoder.encode(refined_query)
+                # Ensure it's numpy
                 if not isinstance(vector_embedding, np.ndarray):
                     vector_embedding = np.array(vector_embedding)
             except Exception as e:
                 logger.error(f"Embedding generation failed: {e}")
         
-        # Check against None or failure
         if vector_embedding is None:
              vector_embedding = np.zeros(EMBEDDING_DIM)
 
-        raw_docs = self.retrieve_context(query, vector_embedding)
-        final_context = self.compress_context(raw_docs, query)
+        # Pass route strategy to retrieve_context
+        raw_docs = self.retrieve_context(refined_query, vector_embedding, strategy=route)
+        final_context = self.compress_context(raw_docs, refined_query)
         
         self.stm_queue.put({
             "type": "interaction",
             "query": query,
+            "refined_query": refined_query,
+            "thought": thought,
             "context_used": final_context,
             "timestamp": time.time()
         })
         
         return final_context
+
