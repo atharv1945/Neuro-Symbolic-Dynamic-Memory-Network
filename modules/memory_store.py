@@ -36,6 +36,7 @@ class SharedMemoryManager:
         
         # Data Structures
         self.graph = nx.Graph()
+        self.vectors = {} # uuid -> np.ndarray
         
         # FAISS Setup (CPU Force)
         self.index = faiss.IndexIDMap(faiss.IndexFlatL2(self.embedding_dim))
@@ -70,6 +71,18 @@ class SharedMemoryManager:
 
                 if index_path.exists():
                     self.index = faiss.read_index(str(index_path))
+
+                vectors_path = DATA_DIR / "vectors.pkl"
+                if vectors_path.exists():
+                    with open(vectors_path, 'rb') as f:
+                        self.vectors = pickle.load(f)
+                
+                # Atomic Persistence Check: Verify FAISS and vectors are in sync
+                if len(self.uuid_to_id) != len(self.vectors):
+                    logger.warning(
+                        f"Persistence mismatch detected! UUID map: {len(self.uuid_to_id)}, "
+                        f"Vectors: {len(self.vectors)}. This may indicate incomplete write."
+                    )
                     
             logger.info(f"Memory Loaded. Graph Nodes: {self.graph.number_of_nodes()}, Vectors: {self.index.ntotal}")
             
@@ -101,10 +114,22 @@ class SharedMemoryManager:
                 
                 # 3. Serialize FAISS
                 faiss.write_index(self.index, str(temp_dir / INDEX_FILENAME))
+
+                # 4. Serialize Vectors
+                with open(temp_dir / "vectors.pkl", 'wb') as f:
+                    pickle.dump(self.vectors, f)
+                
+                # Atomic Persistence Check: Verify consistency before swap
+                if len(self.uuid_to_id) != len(self.vectors):
+                    logger.error(
+                        f"Pre-swap validation failed! UUID map: {len(self.uuid_to_id)}, "
+                        f"Vectors: {len(self.vectors)}. Aborting snapshot to prevent corruption."
+                    )
+                    return
                 
                 logger.info("Serialization complete. Swapping directories...")
                 
-                # 4. Atomic Swap
+                # 5. Atomic Swap
                 if atomic_dir_swap(DATA_DIR, temp_dir):
                     logger.info("Snapshot Saved Successfully.")
                 else:
@@ -146,9 +171,10 @@ class SharedMemoryManager:
                 
                 self.graph.add_node(uuid, **metadata)
                 
-                # 4. Update Maps
+                # 4. Update Maps and Vector Storage
                 self.id_to_uuid[current_id] = uuid
                 self.uuid_to_id[uuid] = current_id
+                self.vectors[uuid] = vector.flatten() # Store as flat array
                 
                 return True
             except Exception as e:
@@ -168,6 +194,8 @@ class SharedMemoryManager:
                 self.index.remove_ids(np.array([internal_id]).astype('int64'))
                 del self.uuid_to_id[uuid]
                 del self.id_to_uuid[internal_id]
+                if uuid in self.vectors:
+                    del self.vectors[uuid]
                 return True
             except Exception as e:
                 logger.error(f"Error removing node {uuid}: {e}")
