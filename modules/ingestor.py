@@ -213,3 +213,9 @@ class WindBellIngestor:
             
         duration = time.time() - start_time
         logger.info(f"Ingestion complete for {file_path}. Found {total_entities} entities in {duration:.2f}s")
+        
+        # === TASK 1: ATOMIC INGESTION PERSISTENCE ===
+        # Trigger immediate save to prevent data loss on crash/restart
+        logger.info("[Ingestor] Triggering auto-save for persistence...")
+        self.memory.save_snapshot()
+        logger.info("[Ingestor] Auto-save complete. Data is now persistent.")

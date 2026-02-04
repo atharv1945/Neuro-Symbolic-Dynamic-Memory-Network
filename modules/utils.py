@@ -26,6 +26,58 @@ def setup_logger(name="NS-DMN"):
 
 logger = setup_logger("Utils")
 
+def _robust_rmtree(path: Path, retries: int = 5, delay: float = 0.2) -> bool:
+    """
+    Windows-safe directory removal with retry logic.
+    
+    Handles WinError 3 (path not found) and WinError 5 (access denied) by retrying
+    with delays to allow OS to release file handles.
+    
+    Args:
+        path: Directory path to remove
+        retries: Maximum retry attempts (default: 5)
+        delay: Seconds to wait between retries (default: 0.2)
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    path = Path(path)
+    
+    if not path.exists():
+        return True  # Already removed
+    
+    for attempt in range(retries):
+        try:
+            shutil.rmtree(path)
+            if attempt > 0:
+                logger.info(f"Successfully removed {path} after {attempt + 1} attempts.")
+            return True
+        except OSError as e:
+            # Check for Windows-specific errors
+            error_code = getattr(e, 'winerror', None)
+            is_windows_lock = error_code in [3, 5]  # WinError 3 or 5
+            
+            if attempt < retries - 1:
+                if is_windows_lock:
+                    logger.warning(
+                        f"WinError {error_code} removing {path}. "
+                        f"Retry {attempt + 1}/{retries} after {delay}s delay..."
+                    )
+                else:
+                    logger.warning(
+                        f"OSError removing {path}: {e}. "
+                        f"Retry {attempt + 1}/{retries} after {delay}s delay..."
+                    )
+                time.sleep(delay)
+            else:
+                logger.error(
+                    f"Failed to remove {path} after {retries} attempts. Last error: {e}"
+                )
+                return False
+    
+    return False
+
+
 def atomic_dir_swap(target_dir: Path, new_dir: Path, retries: int = 5):
     """
     Windows-safe atomic directory swap.
@@ -45,10 +97,8 @@ def atomic_dir_swap(target_dir: Path, new_dir: Path, retries: int = 5):
 
     # 1. Clear old backup if it exists (Lazy Cleanup)
     if backup_dir.exists():
-        try:
-            shutil.rmtree(backup_dir)
-        except OSError as e:
-            logger.warning(f"Could not clear old backup {backup_dir}: {e}")
+        if not _robust_rmtree(backup_dir):
+            logger.warning(f"Could not clear old backup {backup_dir}. Aborting swap.")
             return False
 
     # 2. Rename Target -> Backup
@@ -86,10 +136,8 @@ def atomic_dir_swap(target_dir: Path, new_dir: Path, retries: int = 5):
         return False
 
     # 4. Success - Delete Backup
-    try:
-        shutil.rmtree(backup_dir)
-    except OSError as e:
-        logger.warning(f"Swap successful, but failed to delete backup {backup_dir}: {e}")
+    if not _robust_rmtree(backup_dir):
+        logger.warning(f"Swap successful, but failed to delete backup {backup_dir}. Manual cleanup may be required.")
     
     logger.info("Atomic Directory Swap Completed Successfully.")
     return True

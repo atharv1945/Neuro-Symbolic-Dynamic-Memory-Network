@@ -26,7 +26,7 @@ EMBEDDING_DIM = 384
 ENTROPY_DECAY_RATE = 0.1     # Point deduction per hour
 PRUNING_THRESHOLD = 0.0      # Nodes with energy <= 0 are removed
 SIMILARITY_THRESHOLD = 90    # rapidfuzz ratio for merging
-COMPRESSION_TARGET_TOKENS = 400
+COMPRESSION_TARGET_TOKENS = 1000
 
 # --- Operational Constants ---
 SAVE_INTERVAL_SECONDS = 600  # Dreamer saves every 10 mins

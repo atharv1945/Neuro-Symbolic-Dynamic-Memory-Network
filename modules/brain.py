@@ -87,35 +87,139 @@ class NeuralBrain:
                 
         return list(set(context_docs))
 
-    def retrieve_graph_context(self, entry_uuids: List[str]) -> List[str]:
+    def retrieve_graph_context(self, entry_uuids: List[str], max_hops: int = 2) -> List[str]:
         """
-        Retrieves 1-hop neighbors for the given entry nodes.
+        Retrieves multi-hop neighbors with PRIORITIZED CONTEXT SELECTION.
+        
+        Implements bucketing to ensure entity definitions (primary) are preserved
+        even when total results exceed compression capacity.
+        
+        IMPORTANT: Works with UNDIRECTED graphs (nx.Graph). Uses neighbors() and 
+        filters by edge attributes and node types.
+        
+        Args:
+            entry_uuids: Starting nodes (typically from vector search)
+            max_hops: Maximum traversal depth (default: 2)
+            
+        Returns:
+            List of formatted context strings (capped at 15 for quality)
         """
-        graph_docs = []
+        # === PRIORITIZED CONTEXT BUCKETS ===
+        primary_context = []    # Direct entity mentions (highest priority)
+        secondary_context = []  # Graph hops (lower priority)
+        primary_chunk_ids = set()  # Track chunks in primary to avoid duplicates
+        
         visited = set(entry_uuids)
         
+        # === TASK 2: RETRIEVAL DIAGNOSTICS ===
+        logger.info(f"[Brain] Graph Entry Points: {entry_uuids} (total: {len(entry_uuids)})")
+        
+        # BFS queue: (node_id, current_hop_depth)
+        from collections import deque
+        queue = deque([(uuid, 0) for uuid in entry_uuids])
+        
         with self.memory.lock:
-            for uuid in entry_uuids:
-                if self.memory.graph.has_node(uuid):
-                    # Get neighbors
-                    neighbors = list(self.memory.graph.neighbors(uuid))
-                    for neighbor_id in neighbors:
+            while queue:
+                current_uuid, hop_depth = queue.popleft()
+                
+                # Don't traverse beyond max_hops
+                if hop_depth >= max_hops:
+                    continue
+                
+                if not self.memory.graph.has_node(current_uuid):
+                    continue
+                
+                # Get node metadata
+                node_data = self.memory.graph.nodes[current_uuid]
+                node_type = node_data.get('type', 'unknown')
+                
+                # === TASK 1: ENTITY EXPANSION (PRIMARY CONTEXT) ===
+                # If this is an entity node, find source chunks that mention it
+                # In an undirected graph, we check neighbors and filter by:
+                # 1. Neighbor type = 'chunk'
+                # 2. Edge relation = 'mentions'
+                if node_type == 'entity':
+                    for neighbor_id in self.memory.graph.neighbors(current_uuid):
                         if neighbor_id not in visited:
-                            # Get edge data (relation)
-                            edge_data = self.memory.graph.get_edge_data(uuid, neighbor_id)
-                            relation = edge_data.get('relation', 'related_to')
+                            # Check if this neighbor is a chunk
+                            neighbor_data = self.memory.graph.nodes.get(neighbor_id, {})
+                            neighbor_type = neighbor_data.get('type', 'unknown')
                             
-                            # Get neighbor content
-                            neighbor_content = self.memory.get_node_content(neighbor_id)
+                            if neighbor_type == 'chunk':
+                                # Get edge data (works in both directions for undirected graph)
+                                edge_data = self.memory.graph.get_edge_data(neighbor_id, current_uuid)
+                                
+                                # Check if this is a 'mentions' edge
+                                if edge_data and edge_data.get('relation') == 'mentions':
+                                    # Get the source chunk text
+                                    chunk_content = self.memory.get_node_content(neighbor_id)
+                                    if chunk_content:
+                                        entity_text = node_data.get('text', current_uuid)
+                                        logger.info(f"[Brain] Entity Expansion: {entity_text} <- Chunk {neighbor_id[:8]}...")
+                                        
+                                        # Add to PRIMARY context (high priority)
+                                        primary_context.append(
+                                            f"[Entity Expansion | {entity_text}]: {chunk_content[:500]}"
+                                        )
+                                        primary_chunk_ids.add(neighbor_id)
+                                        visited.add(neighbor_id)
+                
+                # === TASK 2: MULTI-HOP TRAVERSAL (SECONDARY CONTEXT) ===
+                # Get all neighbors for standard graph traversal
+                neighbors = list(self.memory.graph.neighbors(current_uuid))
+                
+                for neighbor_id in neighbors:
+                    if neighbor_id not in visited:
+                        # Get edge data (relation)
+                        try:
+                            edge_data = self.memory.graph.get_edge_data(current_uuid, neighbor_id)
+                            relation = edge_data.get('relation', 'related_to') if edge_data else 'related_to'
+                        except (KeyError, AttributeError):
+                            relation = 'related_to'
+                        
+                        # Get neighbor content
+                        neighbor_content = self.memory.get_node_content(neighbor_id)
+                        
+                        if neighbor_content:
+                            # Tag with hop depth for transparency
+                            hop_label = f"Hop {hop_depth + 1}" if hop_depth > 0 else "Direct Link"
+                            logger.info(f"[Brain] Traversing ({hop_label}): {current_uuid[:8]}... --{relation}--> {neighbor_id[:8]}...")
                             
-                            # Format: Node --relation--> Neighbor
-                            # We might need the source node text too to make sense
-                            # Simplifying: just adding neighbor text with relation note
-                            if neighbor_content:
-                                graph_docs.append(f"[Graph Link: {relation}] {neighbor_content}")
-                            
-                            visited.add(neighbor_id)
-        return graph_docs
+                            # Add to SECONDARY context (lower priority)
+                            # Skip if already in primary context (deduplication)
+                            if neighbor_id not in primary_chunk_ids:
+                                secondary_context.append(
+                                    f"[Graph {hop_label}: {relation}] {neighbor_content[:300]}"
+                                )
+                        
+                        # Add to queue for next hop
+                        visited.add(neighbor_id)
+                        queue.append((neighbor_id, hop_depth + 1))
+        
+        # === PRIORITIZED MERGE & CAP ===
+        # Primary context first, then secondary (space permitting)
+        all_docs = primary_context + secondary_context
+        total_retrieved = len(all_docs)
+        
+        # Hard cap at 15 documents to ensure quality over quantity
+        MAX_CONTEXT_DOCS = 15
+        final_docs = all_docs[:MAX_CONTEXT_DOCS]
+        
+        dropped_count = max(0, total_retrieved - MAX_CONTEXT_DOCS)
+        
+        logger.info(
+            f"[Brain] Graph Retrieval Complete: {len(final_docs)} context docs "
+            f"(Primary: {len(primary_context)}, Secondary: {len(secondary_context)}, "
+            f"Dropped: {dropped_count}, Nodes Visited: {len(visited)})"
+        )
+        
+        if dropped_count > 0:
+            logger.info(
+                f"[Brain] Prioritization: Kept {len(final_docs)} docs (Dropped {dropped_count} lower-priority docs)"
+            )
+        
+        return final_docs
+
 
     def compress_context(self, context: List[str], query: str) -> str:
         if not context:

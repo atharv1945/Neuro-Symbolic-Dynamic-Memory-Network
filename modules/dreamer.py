@@ -46,6 +46,7 @@ class MemoryDreamer(threading.Thread):
         self.stm_queue = stm_queue
         self.stop_event = threading.Event()
         self.last_save_time = time.time()
+        self.last_rem_time = 0  # Track last REM cycle time for frequency control
         
         # Gate threshold from config
         self.similarity_gate = SIMILARITY_THRESHOLD / 100.0
@@ -79,13 +80,21 @@ class MemoryDreamer(threading.Thread):
                         processed_count = 0
 
                 except queue.Empty:
-                    # --- IDLE TIME: Run REM Cycle ---
-                    self.run_rem_cycle()
+                    # --- IDLE TIME: Run REM Cycle with Frequency Control ---
+                    current_time = time.time()
+                    REM_CYCLE_INTERVAL = 300  # 5 minutes between REM cycles
                     
-                    if time.time() - self.last_save_time > SAVE_INTERVAL_SECONDS:
+                    if current_time - self.last_rem_time >= REM_CYCLE_INTERVAL:
+                        logger.info("[REM] Idle detected. Initiating REM Consolidation Cycle...")
+                        self.run_rem_cycle()
+                        self.last_rem_time = current_time
+                        logger.info("[REM] Cycle complete. Next cycle in 5 minutes.")
+                    
+                    # Periodic save
+                    if current_time - self.last_save_time > SAVE_INTERVAL_SECONDS:
                         logger.info("Auto-Saving Memory Snapshot...")
                         self.memory.save_snapshot()
-                        self.last_save_time = time.time()
+                        self.last_save_time = current_time
 
             except Exception as e:
                 logger.error(f"Dreamer Error: {e}")
