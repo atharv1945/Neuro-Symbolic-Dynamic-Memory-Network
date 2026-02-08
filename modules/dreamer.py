@@ -25,7 +25,7 @@ from modules.memory_store import SharedMemoryManager
 
 # --- REM Cycle Configuration ---
 REM_MAX_PAIRS_PER_CYCLE = 20            # Max latent pairs to process per cycle
-REM_MIN_CLIQUE_SIZE = 3                 # Minimum clique size for abstraction
+REM_MIN_CLIQUE_SIZE = 2                 # Minimum clique size for abstraction (TUNED: Was 3, now 2 for demo)
 REM_CHILD_ENERGY_DECAY = 0.7            # Multiplier to reduce child node energy (soft prune)
 REM_CYCLE_TIMEOUT_SECONDS = 2.0         # Safety backoff timeout
 

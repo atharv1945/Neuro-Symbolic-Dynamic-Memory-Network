@@ -13,6 +13,11 @@ except ImportError:
     fitz = None
 
 try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
+
+try:
     from gliner import GLiNER
 except ImportError:
     GLiNER = None
@@ -82,29 +87,71 @@ class WindBellIngestor:
                 logger.error(f"Failed to load GLiNER: {e}")
                 self.gliner_model = None
 
-    def extract_text(self, file_path: str) -> str:
-        """Extracts text from a PDF file using PyMuPDF (fitz)."""
+    def extract_text(self, file_path: str) -> Tuple[str, Dict[int, int]]:
+        """Extracts text from a PDF file using PyMuPDF (fitz) or pypdf fallback.
+        
+        Returns:
+            Tuple of (full_text, page_map) where page_map maps character offsets to page numbers.
+            Example: {0: 1, 1024: 2} means chars 0-1023 are page 1, 1024+ are page 2.
+        """
         if not os.path.exists(file_path):
             logger.error(f"File not found: {file_path}")
-            return ""
+            return "", {0: 1}
             
         if not fitz:
-            # Fallback to text read
+            # Try pypdf fallback for PDF files
+            if PdfReader and file_path.lower().endswith('.pdf'):
+                try:
+                    logger.info(f"Using PyPDF fallback for {file_path}")
+                    reader = PdfReader(file_path)
+                    text = ""
+                    page_map = {}
+                    
+                    for page_num, page in enumerate(reader.pages, start=1):
+                        page_map[len(text)] = page_num
+                        text += page.extract_text() + "\n"
+                    
+                    return text, page_map
+                except Exception as e:
+                    logger.error(f"PyPDF extraction failed: {e}")
+            
+            # Final fallback to text read (no page info for non-PDF)
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    return f.read()
+                    return f.read(), {0: 1}
             except:
-                return ""
+                return "", {0: 1}
 
         try:
             doc = fitz.open(file_path)
             text = ""
-            for page in doc:
+            page_map = {}  # Maps character offset to page number
+            
+            for page_num, page in enumerate(doc, start=1):
+                page_map[len(text)] = page_num  # Record start offset of this page
                 text += page.get_text() + "\n"
-            return text
+            
+            return text, page_map
         except Exception as e:
             logger.error(f"PDF Extraction failed for {file_path}: {e}")
-            return ""
+            
+            # Try pypdf fallback if fitz fails
+            if PdfReader and file_path.lower().endswith('.pdf'):
+                try:
+                    logger.info(f"Retrying with PyPDF fallback after fitz error")
+                    reader = PdfReader(file_path)
+                    text = ""
+                    page_map = {}
+                    
+                    for page_num, page in enumerate(reader.pages, start=1):
+                        page_map[len(text)] = page_num
+                        text += page.extract_text() + "\n"
+                    
+                    return text, page_map
+                except Exception as e2:
+                    logger.error(f"PyPDF fallback also failed: {e2}")
+            
+            return "", {0: 1}
 
     def extract_entities(self, text_chunk: str) -> List[Tuple[str, str, str]]:
         """
@@ -131,6 +178,29 @@ class WindBellIngestor:
             logger.error(f"GLiNER Extraction failed: {e}")
             return []
 
+    def _get_page_for_offset(self, page_map: Dict[int, int], char_offset: int) -> int:
+        """Helper to find page number for a given character offset.
+        
+        Args:
+            page_map: Dict mapping character offsets to page numbers
+            char_offset: Character position in the document
+            
+        Returns:
+            Page number for the given offset
+        """
+        if not page_map:
+            return 1
+        
+        # Find the largest offset that's <= char_offset
+        page_num = 1
+        for offset in sorted(page_map.keys()):
+            if offset <= char_offset:
+                page_num = page_map[offset]
+            else:
+                break
+        
+        return page_num
+    
     def link_entities(self, triplets: List[Tuple[str, str, str]], chunk_id: Optional[str] = None) -> int:
         """
         Creates edges in the graph for the provided triplets.
@@ -169,10 +239,15 @@ class WindBellIngestor:
         logger.info(f"Starting ingestion for: {file_path}")
         start_time = time.time()
         
-        text = self.extract_text(file_path)
+        # Extract text and page mapping
+        text, page_map = self.extract_text(file_path)
         if not text:
             logger.warning("No text extracted. Aborting.")
             return
+        
+        # Extract file metadata
+        file_name = os.path.basename(file_path)
+        ingest_date = time.time()  # Current timestamp
 
         # Simple Chunking
         CHUNK_SIZE = 1000
@@ -185,6 +260,10 @@ class WindBellIngestor:
         for idx, chunk in enumerate(chunks):
             chunk_id = str(uuid.uuid4())
             
+            # Calculate page number for this chunk
+            char_offset = idx * CHUNK_SIZE
+            page_number = self._get_page_for_offset(page_map, char_offset)
+            
             # 1. Embed Chunk
             vector = np.zeros(EMBEDDING_DIM)
             if self.encoder:
@@ -193,12 +272,19 @@ class WindBellIngestor:
                 except Exception as e:
                     logger.error(f"Embedding failed: {e}")
             
-            # 2. Add Chunk Node
+            # 2. Add Chunk Node with enhanced metadata
             success = self.memory.add_memory(
                 uuid=chunk_id,
                 text=chunk,
                 vector=vector,
-                metadata={"source": file_path, "type": "chunk", "chunk_idx": idx}
+                metadata={
+                    "source": file_path,
+                    "file_name": file_name,
+                    "ingest_date": ingest_date,
+                    "page_number": page_number,
+                    "type": "chunk",
+                    "chunk_idx": idx
+                }
             )
             
             if success:

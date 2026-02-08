@@ -1,7 +1,8 @@
 import logging
 import queue
 import time
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Optional
+import datetime
 import numpy as np
 from rapidfuzz import fuzz
 
@@ -65,11 +66,19 @@ class NeuralBrain:
                 return False
         return True
 
-    def retrieve_context(self, query: str, vector_embedding: np.ndarray, strategy: str = 'vector') -> List[str]:
+    def retrieve_context(self, query: str, vector_embedding: np.ndarray, strategy: str = 'vector', filters: Optional[Dict] = None) -> List[str]:
         context_docs = []
         
-        # 1. Vector Search (Always done to find entry points)
-        hits = self.memory.query_similarity(vector_embedding, top_k=5)
+        # 1. Vector Search with Over-Fetching (Always done to find entry points)
+        # Increase top_k to 50 to ensure we have enough candidates after filtering
+        top_k = 50 if filters else 5
+        hits = self.memory.query_similarity(vector_embedding, top_k=top_k)
+        
+        # 2. Apply Metadata Filtering (if filters are provided)
+        if filters:
+            filtered_hits = self._apply_metadata_filter(hits, filters)
+            logger.info(f"[Brain] Filtering: {len(hits)} candidates -> {len(filtered_hits)} results (filters: {filters})")
+            hits = filtered_hits[:5]  # Take top 5 filtered results
         
         # Collect distinct UUIDs from hits
         hit_uuids = [uuid for uuid, score in hits]
@@ -80,12 +89,65 @@ class NeuralBrain:
              if content:
                  context_docs.append(f"[Vector Match]: {content}")
                  
-        # 2. Graph Traversal
+        # 3. Graph Traversal
         if strategy in ['graph', 'hybrid']:
             graph_context = self.retrieve_graph_context(hit_uuids)
             context_docs.extend(graph_context)
                 
         return list(set(context_docs))
+    
+    def _apply_metadata_filter(self, hits: List[Tuple[str, float]], filters: Dict) -> List[Tuple[str, float]]:
+        """
+        Filters hits based on metadata constraints.
+        Uses fuzzy matching for filenames (case-insensitive).
+        """
+        if not filters:
+            return hits
+        
+        filtered = []
+        for uuid, score in hits:
+            with self.memory.lock:
+                if not self.memory.graph.has_node(uuid):
+                    continue
+                
+                metadata = self.memory.graph.nodes.get(uuid, {})
+            
+            # Filter by source file (fuzzy match)
+            if filters.get('source_file'):
+                file_name = metadata.get('file_name', '')
+                if not self._fuzzy_match_filename(file_name, filters['source_file']):
+                    continue
+            
+            # Filter by date range
+            if filters.get('date_range'):
+                ingest_date = metadata.get('ingest_date', 0)
+                if not self._match_date_range(ingest_date, filters['date_range']):
+                    continue
+            
+            filtered.append((uuid, score))
+        
+        return filtered
+    
+    def _fuzzy_match_filename(self, stored_name: str, query_name: str) -> bool:
+        """Case-insensitive fuzzy filename matching using rapidfuzz."""
+        if not stored_name or not query_name:
+            return False
+        # Already imported: from rapidfuzz import fuzz
+        score = fuzz.ratio(stored_name.lower(), query_name.lower())
+        return score > 70  # 70% similarity threshold
+    
+    def _match_date_range(self, timestamp: float, date_range: str) -> bool:
+        """Checks if timestamp falls within date range (year-based)."""
+        if not timestamp or not date_range:
+            return False
+        try:
+            date = datetime.datetime.fromtimestamp(timestamp)
+            year_str = str(date.year)
+            # Simple contains check (supports '2025', '2024-01', etc.)
+            return date_range in year_str or year_str in date_range
+        except (ValueError, OSError):
+            return False
+
 
     def retrieve_graph_context(self, entry_uuids: List[str], max_hops: int = 2) -> List[str]:
         """
@@ -246,11 +308,13 @@ class NeuralBrain:
         if not self.check_safety(query):
             return "Error: Unsafe Query Detected."
             
-        # 1. Reasoner Step
-        refined_query, route, thought = self.router.analyze_query(query)
-        logger.info(f"Reasoner: {dict(thought=thought, route=route)}")
+        # 1. Reasoner Step (Now returns 4 values including filters)
+        refined_query, route, thought, filters = self.router.analyze_query(query)
+        logger.info(f"Reasoner: {dict(thought=thought, route=route, filters=filters)}")
         print(f"[Brain] Inner Monologue: {thought}")
         print(f"[Brain] Routing: {route.upper()} | Refined Query: {refined_query}")
+        if filters:
+            print(f"[Brain] Filters Applied: {filters}")
             
         vector_embedding = None
         if self.encoder:
@@ -265,8 +329,8 @@ class NeuralBrain:
         if vector_embedding is None:
              vector_embedding = np.zeros(EMBEDDING_DIM)
 
-        # Pass route strategy to retrieve_context
-        raw_docs = self.retrieve_context(refined_query, vector_embedding, strategy=route)
+        # Pass route strategy and filters to retrieve_context
+        raw_docs = self.retrieve_context(refined_query, vector_embedding, strategy=route, filters=filters)
         final_context = self.compress_context(raw_docs, refined_query)
         
         self.stm_queue.put({
