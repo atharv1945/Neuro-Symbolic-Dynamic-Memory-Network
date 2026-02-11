@@ -28,6 +28,11 @@ PRUNING_THRESHOLD = 0.0      # Nodes with energy <= 0 are removed
 SIMILARITY_THRESHOLD = 65    # rapidfuzz ratio for merging
 COMPRESSION_TARGET_TOKENS = 1000
 
+# --- Titans-Inspired Constants ---
+SURPRISE_THRESHOLD = 0.92      # Similarity > 0.92 = redundant (skip entity extraction)
+REM_MIN_CLIQUE_SIZE = 3        # Minimum clique size for concept creation
+REM_MOMENTUM_THRESHOLD = 5     # Momentum threshold for early consolidation
+
 # --- Operational Constants ---
 SAVE_INTERVAL_SECONDS = 600  # Dreamer saves every 10 mins
 DREAMER_BATCH_SIZE = 5       # Process N items from STM before checking maintenance

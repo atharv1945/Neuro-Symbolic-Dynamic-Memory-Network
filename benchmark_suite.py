@@ -264,12 +264,26 @@ def run_ingestion_test(ingestor: WindBellIngestor, test_file: str) -> Dict:
     # PASS if > 100 tokens/sec (reasonable for PDF processing)
     status = "PASS" if tokens_per_sec > 100 else "FAIL"
     
+    # === TITANS: Calculate Ingestion Efficiency Ratio ===
+    with ingestor.memory.lock:
+        total_chunks = sum(1 for n, d in ingestor.memory.graph.nodes(data=True) 
+                          if d.get('type') == 'chunk')
+        redundant_chunks = sum(1 for n, d in ingestor.memory.graph.nodes(data=True) 
+                              if d.get('is_redundant') == True)
+        surprising_chunks = total_chunks - redundant_chunks
+    
+    bloat_reduction = (redundant_chunks / total_chunks * 100) if total_chunks > 0 else 0
+    
     print(f"\n[Results]")
     print(f"  Duration: {duration:.2f} sec")
     print(f"  Tokens processed: {total_tokens}")
     print(f"  Entities extracted: {entities_found}")
     print(f"  TPI (Tokens/sec): {tokens_per_sec:.1f}")
     print(f"  Entities/sec: {entities_per_sec:.1f}")
+    print(f"  [Titans] Total chunks: {total_chunks}")
+    print(f"  [Titans] Surprising chunks: {surprising_chunks}")
+    print(f"  [Titans] Redundant chunks: {redundant_chunks}")
+    print(f"  [Titans] Bloat reduction: {bloat_reduction:.1f}%")
     print(f"  Status: {status}")
     
     return {
@@ -278,6 +292,10 @@ def run_ingestion_test(ingestor: WindBellIngestor, test_file: str) -> Dict:
         "total_entities": entities_found,
         "tokens_per_sec": tokens_per_sec,
         "entities_per_sec": entities_per_sec,
+        "total_chunks": total_chunks,
+        "surprising_chunks": surprising_chunks,
+        "redundant_chunks": redundant_chunks,
+        "bloat_reduction_pct": bloat_reduction,
         "status": status
     }
 
@@ -350,11 +368,17 @@ def run_accuracy_test(brain: NeuralBrain, gold_data: List[Dict]) -> Dict:
                         {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
                     ]
                     
+                    # === TITANS: Hardware-Aware Guardrails ===
+                    ollama_params = {"stream": False}
+                    if available_ram > 0 and available_ram < 1.5:
+                        logger.warning(f"[Titans] Low RAM ({available_ram:.1f}GB) - applying guardrails (num_predict=64)")
+                        ollama_params["options"] = {"num_predict": 64}  # Limit output tokens
+                    
                     generation_start = time.perf_counter()
                     response = ollama.chat(
                         model="llama3",
                         messages=messages,
-                        stream=False
+                        **ollama_params
                     )
                     generation_latency = time.perf_counter() - generation_start
                     generation_latencies.append(generation_latency)
@@ -469,9 +493,14 @@ def run_consolidation_test(memory_manager: SharedMemoryManager, dreamer: MemoryD
     
     # Trigger REM cycle
     print(f"\n[Triggering REM Cycle...]")
+    
+    # === TITANS: Measure Consolidation Velocity ===
+    consolidation_start = time.perf_counter()
+    
     try:
         dreamer.run_rem_cycle()
-        print(f"  REM cycle completed")
+        consolidation_time = time.perf_counter() - consolidation_start
+        print(f"  REM cycle completed in {consolidation_time:.2f}s")
     except Exception as e:
         logger.error(f"REM cycle failed: {e}")
         return {
@@ -479,6 +508,8 @@ def run_consolidation_test(memory_manager: SharedMemoryManager, dreamer: MemoryD
             "final_nodes": initial_node_count,
             "new_concepts": 0,
             "consolidation_ratio": 0.0,
+            "consolidation_velocity_sec": 0.0,
+            "concepts_per_second": 0.0,
             "status": "ERROR",
             "error": str(e)
         }
@@ -501,11 +532,16 @@ def run_consolidation_test(memory_manager: SharedMemoryManager, dreamer: MemoryD
     # ACTIVE if new concepts were created
     status = "ACTIVE" if new_concepts > 0 else "PASSIVE"
     
+    # === TITANS: Calculate Consolidation Velocity ===
+    concepts_per_second = new_concepts / consolidation_time if consolidation_time > 0 and new_concepts > 0 else 0
+    
     print(f"\n[Final State]")
     print(f"  Total nodes: {final_node_count}")
     print(f"  Concept nodes: {final_concepts}")
     print(f"  New concepts: {new_concepts}")
     print(f"  Consolidation ratio: {consolidation_ratio:.2f}%")
+    print(f"  [Titans] Consolidation time: {consolidation_time:.2f}s")
+    print(f"  [Titans] Concepts/sec: {concepts_per_second:.2f}")
     print(f"  Status: {status}")
     
     return {
@@ -513,6 +549,8 @@ def run_consolidation_test(memory_manager: SharedMemoryManager, dreamer: MemoryD
         "final_nodes": final_node_count,
         "new_concepts": new_concepts,
         "consolidation_ratio": consolidation_ratio,
+        "consolidation_velocity_sec": consolidation_time,
+        "concepts_per_second": concepts_per_second,
         "status": status
     }
 

@@ -17,7 +17,9 @@ from config import (
     SAVE_INTERVAL_SECONDS,
     DREAMER_BATCH_SIZE,
     EMBEDDING_MODEL_NAME,
-    SIMILARITY_THRESHOLD
+    SIMILARITY_THRESHOLD,
+    REM_MIN_CLIQUE_SIZE,
+    REM_MOMENTUM_THRESHOLD
 )
 from modules.utils import logger
 from modules.memory_store import SharedMemoryManager
@@ -25,7 +27,6 @@ from modules.memory_store import SharedMemoryManager
 
 # --- REM Cycle Configuration ---
 REM_MAX_PAIRS_PER_CYCLE = 20            # Max latent pairs to process per cycle
-REM_MIN_CLIQUE_SIZE = 2                 # Minimum clique size for abstraction (TUNED: Was 3, now 2 for demo)
 REM_CHILD_ENERGY_DECAY = 0.7            # Multiplier to reduce child node energy (soft prune)
 REM_CYCLE_TIMEOUT_SECONDS = 2.0         # Safety backoff timeout
 
@@ -156,8 +157,14 @@ class MemoryDreamer(threading.Thread):
     # =========================================================================
     
     def run_rem_cycle(self):
-        """Orchestrate the REM cycle with safety yields."""
+        """Orchestrate the REM cycle with safety yields and momentum initialization."""
         cycle_start = time.time()
+        
+        # === TITANS: Initialize momentum for all nodes ===
+        with self.memory.lock:
+            for node in self.memory.graph.nodes():
+                if 'momentum' not in self.memory.graph.nodes[node]:
+                    self.memory.graph.nodes[node]['momentum'] = 0
         
         # Phase 1: Latent links
         if self._safety_yield(): return
@@ -226,7 +233,14 @@ class MemoryDreamer(threading.Thread):
                                     weight=0.5,
                                     similarity=similarity
                                 )
+                                
+                                # === TITANS: Increment Momentum ===
+                                self.memory.graph.nodes[source_uuid]['momentum'] = self.memory.graph.nodes[source_uuid].get('momentum', 0) + 1
+                                self.memory.graph.nodes[target_uuid]['momentum'] = self.memory.graph.nodes[target_uuid].get('momentum', 0) + 1
+                                
                                 logger.info(f"[REM] Discovered latent link: {source_uuid[:8]} <-> {target_uuid[:8]} (sim: {similarity:.2f})")
+                                logger.info(f"[Titans] Momentum: {source_uuid[:8]} -> {self.memory.graph.nodes[source_uuid]['momentum']}")
+                                logger.info(f"[Titans] Momentum: {target_uuid[:8]} -> {self.memory.graph.nodes[target_uuid]['momentum']}")
                                 discovered += 1
 
     def _abstract_concepts(self, cycle_start: float):
@@ -254,9 +268,29 @@ class MemoryDreamer(threading.Thread):
         if not cliques:
             return
 
-        # Process the largest clique
-        cliques.sort(key=len, reverse=True)
-        self._create_super_node(cliques[0])
+        # === TITANS: Sort cliques by average momentum ===
+        def avg_momentum(clique):
+            with self.memory.lock:
+                momentums = [self.memory.graph.nodes[n].get('momentum', 0) for n in clique if self.memory.graph.has_node(n)]
+            return sum(momentums) / len(momentums) if momentums else 0
+        
+        cliques_sorted = sorted(cliques, key=avg_momentum, reverse=True)
+        
+        # Process high-momentum clusters first
+        for clique in cliques_sorted:
+            clique_size = len(clique)
+            avg_mom = avg_momentum(clique)
+            
+            # === TITANS: Early consolidation for high-momentum clusters ===
+            if avg_mom >= REM_MOMENTUM_THRESHOLD:
+                logger.info(f"[Titans] High-momentum cluster (size={clique_size}, momentum={avg_mom:.1f}) - consolidating")
+                self._create_super_node(clique)
+                break  # Process one per cycle
+            elif clique_size >= REM_MIN_CLIQUE_SIZE:
+                # Standard consolidation for large clusters
+                logger.info(f"[REM] Standard cluster (size={clique_size}, momentum={avg_mom:.1f}) - consolidating")
+                self._create_super_node(clique)
+                break  # Process one per cycle
 
     def _create_super_node(self, nodes: list):
         """
@@ -299,8 +333,21 @@ class MemoryDreamer(threading.Thread):
         
         summary_text = f"Abstract Concept: {', '.join(texts[:3])}..."
 
-        # 3. Add to Main Memory (Graph + FAISS)
-        self.memory.add_memory(concept_uuid, summary_text, centroid, metadata={'is_concept': True})
+        # === TITANS: Calculate average momentum for concept metadata ===
+        with self.memory.lock:
+            avg_momentum = sum(self.memory.graph.nodes[n].get('momentum', 0) for n in nodes if self.memory.graph.has_node(n)) / len(nodes)
+
+        # 3. Add to Main Memory (Graph + FAISS) with Titans metadata
+        self.memory.add_memory(
+            concept_uuid, 
+            summary_text, 
+            centroid, 
+            metadata={
+                'is_concept': True,
+                'method': 'titans_momentum',
+                'avg_momentum': avg_momentum
+            }
+        )
         
         # 4. Link children and Soft Prune
         with self.memory.lock:

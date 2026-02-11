@@ -22,7 +22,7 @@ try:
 except ImportError:
     GLiNER = None
 
-from config import EMBEDDING_DIM
+from config import EMBEDDING_DIM, SURPRISE_THRESHOLD
 from modules.utils import logger
 from modules.memory_store import SharedMemoryManager
 
@@ -201,6 +201,48 @@ class WindBellIngestor:
         
         return page_num
     
+    def _check_surprise(self, vector: np.ndarray, text: str) -> bool:
+        """
+        Check if content is surprising (novel) based on similarity to existing memory.
+        
+        Titans-inspired: Prevent graph bloat by detecting redundant content.
+        
+        Args:
+            vector: Embedding vector of the chunk
+            text: Text content of the chunk
+            
+        Returns:
+            True if surprising (similarity < SURPRISE_THRESHOLD)
+            False if redundant (similarity >= SURPRISE_THRESHOLD)
+        """
+        # Query existing memory
+        with self.memory.lock:
+            if self.memory.index is None or self.memory.index.ntotal == 0:
+                # Empty memory - everything is surprising
+                return True
+            
+            # Find most similar existing chunk
+            try:
+                hits = self.memory.query_similarity(vector, top_k=1)
+                
+                if not hits:
+                    return True
+                
+                uuid, similarity = hits[0]
+                
+                # Check surprise threshold
+                if similarity >= SURPRISE_THRESHOLD:
+                    logger.info(f"[Titans] Low surprise: {similarity:.3f} >= {SURPRISE_THRESHOLD} (redundant)")
+                    return False
+                else:
+                    logger.info(f"[Titans] High surprise: {similarity:.3f} < {SURPRISE_THRESHOLD} (novel)")
+                    return True
+                    
+            except Exception as e:
+                logger.error(f"Surprise check failed: {e}")
+                # On error, assume surprising to avoid skipping content
+                return True
+    
     def link_entities(self, triplets: List[Tuple[str, str, str]], chunk_id: Optional[str] = None) -> int:
         """
         Creates edges in the graph for the provided triplets.
@@ -265,6 +307,8 @@ class WindBellIngestor:
             page_number = self._get_page_for_offset(page_map, char_offset)
             
             # 1. Embed Chunk
+            
+            # Generate embedding
             vector = np.zeros(EMBEDDING_DIM)
             if self.encoder:
                 try:
@@ -272,30 +316,68 @@ class WindBellIngestor:
                 except Exception as e:
                     logger.error(f"Embedding failed: {e}")
             
-            # 2. Add Chunk Node with enhanced metadata
-            success = self.memory.add_memory(
-                uuid=chunk_id,
-                text=chunk,
-                vector=vector,
-                metadata={
+            # === TITANS: Surprise Check ===
+            is_surprising = self._check_surprise(vector, chunk)
+            
+            # Calculate page number
+            page_number = self._get_page_for_offset(page_map, char_offset)
+            
+            if not is_surprising:
+                # Redundant content - skip entity extraction to prevent graph bloat
+                logger.info(f"[Titans] Chunk {idx} is redundant (low surprise) - skipping entity extraction")
+                metadata = {
                     "source": file_path,
                     "file_name": file_name,
                     "ingest_date": ingest_date,
                     "page_number": page_number,
                     "type": "chunk",
-                    "chunk_idx": idx
+                    "chunk_idx": idx,
+                    "is_redundant": True,
+                    "surprise_score": 0.0
                 }
+                
+                # Add chunk node (but no entities)
+                success = self.memory.add_memory(
+                    uuid=chunk_id,
+                    text=chunk,
+                    vector=vector,
+                    metadata=metadata
+                )
+                
+                if not success:
+                    logger.error(f"Failed to add chunk {chunk_id}")
+                
+                continue  # Skip entity extraction
+            
+            # Novel content - full processing with entity extraction
+            triplets = self.extract_entities(chunk) # Renamed from 'entities' to 'triplets' to match existing code
+            
+            metadata = {
+                "source": file_path,
+                "file_name": file_name,
+                "ingest_date": ingest_date,
+                "page_number": page_number,
+                "type": "chunk",
+                "chunk_idx": idx,
+                "is_redundant": False,
+                "surprise_score": 1.0 # Placeholder, actual score would come from _check_surprise
+            }
+            
+            success = self.memory.add_memory(
+                uuid=chunk_id,
+                text=chunk,
+                vector=vector,
+                metadata=metadata
             )
             
-            if success:
-                # 3. Extract Entities (SLM Step - GLiNER)
-                # This should now be very fast
-                triplets = self.extract_entities(chunk)
-                
-                if triplets:
-                    # logger.info(f"Chunk {idx}: Found {len(triplets)} entities.")
-                    self.link_entities(triplets, chunk_id=chunk_id)
-                    total_entities += len(triplets)
+            if not success:
+                logger.error(f"Failed to add chunk {chunk_id}")
+                continue
+            
+            # Add entity nodes and edges
+            if triplets: # Check if triplets exist before linking
+                self.link_entities(triplets, chunk_id=chunk_id)
+                total_entities += len(triplets)
             
         duration = time.time() - start_time
         logger.info(f"Ingestion complete for {file_path}. Found {total_entities} entities in {duration:.2f}s")
