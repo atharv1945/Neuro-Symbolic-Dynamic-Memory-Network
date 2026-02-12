@@ -87,7 +87,12 @@ class NeuralBrain:
         for uuid in hit_uuids:
              content = self.memory.get_node_content(uuid)
              if content:
-                 context_docs.append(f"[Vector Match]: {content}")
+                 # Get metadata for source labeling
+                 meta = self.memory.graph.nodes.get(uuid, {})
+                 file_name = meta.get('file_name', 'Unknown')
+                 
+                 # Task 1: Source Labeling
+                 context_docs.append(f"[SOURCE: {file_name}] CONTENT: {content}")
                  
         # 3. Graph Traversal
         if strategy in ['graph', 'hybrid']:

@@ -290,6 +290,9 @@ class WindBellIngestor:
         # Extract file metadata
         file_name = os.path.basename(file_path)
         ingest_date = time.time()  # Current timestamp
+        
+        # Task 3: Ingestion Tagging (Core System Identification)
+        is_core = "Nlp_project" in file_name
 
         # Simple Chunking
         CHUNK_SIZE = 1000
@@ -333,7 +336,8 @@ class WindBellIngestor:
                     "type": "chunk",
                     "chunk_idx": idx,
                     "is_redundant": True,
-                    "surprise_score": 0.0
+                    "surprise_score": 0.0,
+                    "is_core_system": is_core
                 }
                 
                 # Add chunk node (but no entities)
@@ -360,7 +364,8 @@ class WindBellIngestor:
                 "type": "chunk",
                 "chunk_idx": idx,
                 "is_redundant": False,
-                "surprise_score": 1.0 # Placeholder, actual score would come from _check_surprise
+                "surprise_score": 1.0, # Placeholder, actual score would come from _check_surprise
+                "is_core_system": is_core
             }
             
             success = self.memory.add_memory(

@@ -25,7 +25,7 @@ EMBEDDING_DIM = 384
 # --- Logic Constants ---
 ENTROPY_DECAY_RATE = 0.1     # Point deduction per hour
 PRUNING_THRESHOLD = 0.0      # Nodes with energy <= 0 are removed
-SIMILARITY_THRESHOLD = 65    # rapidfuzz ratio for merging
+SIMILARITY_THRESHOLD = 75    # rapidfuzz ratio for merging
 COMPRESSION_TARGET_TOKENS = 1000
 
 # --- Titans-Inspired Constants ---
