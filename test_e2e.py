@@ -90,6 +90,41 @@ GOLDEN_DATASET = [
         "expected_context_keywords": ["split", "compute", "cpu", "gpu", "cerebellum", "cerebrum"],
         "category": "architecture"
     },
+    {
+        "id": "Q6",
+        "question": "What BLEU score does the Transformer achieve on the WMT 2014 English-to-German translation task?",
+        "ground_truth": "The Transformer model achieves a 28.4 BLEU score on the WMT 2014 English-to-German translation task, improving over the existing best results by over 2 BLEU.",
+        "expected_context_keywords": ["bleu", "28.4", "english", "german", "translation", "transformer"],
+        "category": "metrics"
+    },
+    {
+        "id": "Q7",
+        "question": "What is the primary architecture of the Transformer model proposed in Attention Is All You Need?",
+        "ground_truth": "The Transformer relies entirely on an attention mechanism, dispensing with recurrence and convolutions entirely, while still using an encoder-decoder structure.",
+        "expected_context_keywords": ["attention", "dispensing", "recurrence", "convolutions", "mechanism"],
+        "category": "architecture"
+    },
+    {
+        "id": "Q8",
+        "question": "Who is the author of 'Playing and Gaming: Reflections and Classifications'?",
+        "ground_truth": "The author is Bo Kampmann Walther, an Associate Professor at the University of Southern Denmark.",
+        "expected_context_keywords": ["bo", "kampmann", "walther", "professor", "denmark"],
+        "category": "authorship"
+    },
+    {
+        "id": "Q9",
+        "question": "According to the gaming article, what is the brief definition of 'Play'?",
+        "ground_truth": "Play is defined as an open-ended territory in which make-believe and world-building are crucial factors.",
+        "expected_context_keywords": ["open-ended", "territory", "make-believe", "world-building"],
+        "category": "definitions"
+    },
+    {
+        "id": "Q10",
+        "question": "What journal published the article 'Environmental Sustainability: A Definition for Environmental Professionals'?",
+        "ground_truth": "The article was published in the Journal of Environmental Sustainability, Volume 1, Issue 1 in 2011.",
+        "expected_context_keywords": ["journal", "environmental", "sustainability", "volume", "2011"],
+        "category": "publishing"
+    }
 ]
 
 
@@ -268,10 +303,12 @@ def run_evaluation():
     recover_previous_state(DATA_DIR)
     memory_manager = SharedMemoryManager()
     stm_queue = queue.Queue()
-    
-    dreamer = MemoryDreamer(memory_manager, stm_queue)
-    dreamer.start()
-    
+    dreamer = None
+    if os.environ.get("DISABLE_DREAMER") != "1":
+        dreamer = MemoryDreamer(memory_manager, stm_queue)
+        dreamer.start()
+    else:
+        print("\n[Init] MemoryDreamer disabled via DISABLE_DREAMER environment variable.")
     brain = NeuralBrain(memory_manager, stm_queue)
     ingestor = WindBellIngestor(memory_manager, brain.encoder)
     
@@ -280,19 +317,26 @@ def run_evaluation():
     
     # --- INGEST if empty ---
     if memory_manager.index.ntotal == 0:
-        test_file = os.path.join(os.path.dirname(__file__), "test", "Nlp_project.pdf")
-        if os.path.exists(test_file):
-            print(f"\n[Ingest] Memory empty. Ingesting {test_file}...")
+        test_dir = os.path.join(os.path.dirname(__file__), "test")
+        if os.path.exists(test_dir):
+            print(f"\n[Ingest] Memory empty. Scanning {test_dir} for PDFs...")
             ingest_start = time.perf_counter()
-            ingestor.ingest_document(test_file)
+            for filename in os.listdir(test_dir):
+                if filename.lower().endswith('.pdf'):
+                    test_file = os.path.join(test_dir, filename)
+                    print(f"  -> Ingesting {filename}...")
+                    ingestor.ingest_document(test_file)
             ingest_duration = time.perf_counter() - ingest_start
             
             with memory_manager.lock:
                 chunk_count = sum(1 for _, d in memory_manager.graph.nodes(data=True)
                                   if d.get('type') == 'chunk')
             print(f"[Ingest] Done: {chunk_count} chunks in {ingest_duration:.1f}s")
+            
+            print("[Wait] Giving memory consolidation threads 15s to settle...")
+            time.sleep(15)
         else:
-            print(f"[ERROR] No test file found at {test_file}. Cannot proceed.")
+            print(f"[ERROR] No test directory found at {test_dir}. Cannot proceed.")
             return
     
     print(f"\n[Ready] {memory_manager.graph.number_of_nodes()} nodes, "
@@ -388,7 +432,7 @@ def run_evaluation():
         if OLLAMA_AVAILABLE and context:
             try:
                 messages = [
-                    {"role": "system", "content": "You are a helpful Research Assistant. Use ONLY the provided Context to answer. Be concise (2-3 sentences). Do not add information not in the context."},
+                    {"role": "system", "content": "You are a strict, factual Research Assistant. Answer the question using ONLY the provided Context. If the Context does not contain the answer, say 'I do not have enough information'. Do NOT use outside knowledge. Be concise (1-3 sentences)."},
                     {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
                 ]
                 
@@ -574,11 +618,11 @@ def run_evaluation():
     print("\n" + "=" * 80)
     print("  Evaluation Complete.")
     print("=" * 80)
-    
     # --- SHUTDOWN ---
     stm_queue.put("POISON_PILL")
-    dreamer.stop()
-    dreamer.join(timeout=5)
+    if dreamer is not None:
+        dreamer.stop()
+        dreamer.join(timeout=5)
     
     return all_results, agg
 

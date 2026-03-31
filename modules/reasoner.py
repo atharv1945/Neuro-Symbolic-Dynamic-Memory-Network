@@ -54,7 +54,7 @@ class CognitiveRouter:
             "Task:\n"
             "1. IDENTITY GUARD: When the user asks about 'this system', 'the architecture', or 'system design', they are referring to the NS-DMN project described in Nlp_project.pdf. Do NOT use technical details from other research papers (like 'Attention Is All You Need') to describe the NS-DMN's internal layers.\n"
             "2. Think silently about what the user really wants, resolving pronouns like 'it' or 'that' if possible based on generic context.\n"
-            "3. Reformulate the query into a clear, standalone search string.\n"
+            "3. Expand the query by adding 2-3 relevant alternative keywords or synonyms to improve search retrieval. Combine the original intent and the keywords into a clear, standalone search string.\n"
             "4. Decide the routing strategy:\n"
             "   - 'hybrid': **PREFERRED** for technical queries, definitions, explanations, or 'What is...' questions. "
             "Hybrid retrieval combines structured entity facts with rich descriptive context from source documents.\n"

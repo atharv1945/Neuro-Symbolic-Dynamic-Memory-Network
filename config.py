@@ -21,6 +21,7 @@ INDEX_FILENAME = "vector_store.index"
 ID_MAP_FILENAME = "id_map.json"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
+RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # --- Logic Constants ---
 ENTROPY_DECAY_RATE = 0.1     # Point deduction per hour

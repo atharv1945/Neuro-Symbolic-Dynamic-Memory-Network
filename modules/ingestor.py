@@ -296,8 +296,8 @@ class WindBellIngestor:
         is_core = "Nlp_project" in file_name
 
         # Sentence-Aware Chunking with Overlap
-        CHUNK_SIZE = 1000
-        CHUNK_OVERLAP = 150  # Character overlap between chunks for context continuity
+        CHUNK_SIZE = 500
+        CHUNK_OVERLAP = 50  # Character overlap between chunks for context continuity
         chunks = self._sentence_aware_chunk(text, CHUNK_SIZE, CHUNK_OVERLAP)
         
         logger.info(f"Split into {len(chunks)} chunks (sentence-aware, overlap={CHUNK_OVERLAP}). Processing...")

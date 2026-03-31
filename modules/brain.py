@@ -15,16 +15,18 @@ from config import (
     LLM_LINGUA_DEVICE,
     COMPRESSION_TARGET_TOKENS,
     EMBEDDING_MODEL_NAME,
-    EMBEDDING_DIM
+    EMBEDDING_DIM,
+    RERANKER_MODEL_NAME
 )
 from modules.utils import logger
 from modules.memory_store import SharedMemoryManager
 from modules.reasoner import CognitiveRouter
 
 try:
-    from sentence_transformers import SentenceTransformer
+    from sentence_transformers import SentenceTransformer, CrossEncoder
 except ImportError:
     SentenceTransformer = None
+    CrossEncoder = None
 
 class NeuralBrain:
     def __init__(self, memory_manager: SharedMemoryManager, stm_queue: queue.Queue):
@@ -36,9 +38,12 @@ class NeuralBrain:
         if SentenceTransformer:
             logger.info(f"Initializing Embedding Model ({EMBEDDING_MODEL_NAME})...")
             self.encoder = SentenceTransformer(EMBEDDING_MODEL_NAME, device='cpu')
+            logger.info(f"Initializing Reranker ({RERANKER_MODEL_NAME})...")
+            self.reranker = CrossEncoder(RERANKER_MODEL_NAME, device='cpu') if CrossEncoder else None
         else:
             logger.warning("SentenceTransformer not found. Vector search disabled.")
             self.encoder = None
+            self.reranker = None
 
         if PromptCompressor:
             logger.info("Initializing LLMLingua... (This may take a moment)")
@@ -71,7 +76,7 @@ class NeuralBrain:
         
         # 1. Vector Search with Over-Fetching (Always done to find entry points)
         # Increase top_k to 50 to ensure we have enough candidates after filtering
-        top_k = 50 if filters else 5
+        top_k = 50 if filters else 20
         hits = self.memory.query_similarity(vector_embedding, top_k=top_k)
         
         # 2. Apply Metadata Filtering (if filters are provided)
@@ -388,6 +393,21 @@ class NeuralBrain:
 
         # Pass route strategy and filters to retrieve_context
         raw_docs = self.retrieve_context(refined_query, vector_embedding, strategy=route, filters=filters)
+        
+        # --- Reranking Step ---
+        if self.reranker and raw_docs:
+            logger.info(f"[Brain] Reranking {len(raw_docs)} documents...")
+            pairs = [[refined_query, doc] for doc in raw_docs]
+            scores = self.reranker.predict(pairs)
+            
+            # Combine docs and scores, then sort descending
+            scored_docs = list(zip(raw_docs, scores))
+            scored_docs.sort(key=lambda x: x[1], reverse=True)
+            
+            # Keep top 10 docs
+            raw_docs = [doc for doc, score in scored_docs[:10]]
+            logger.info(f"[Brain] Kept top {len(raw_docs)} documents after reranking")
+            
         final_context = self.compress_context(raw_docs, refined_query)
         
         self.stm_queue.put({
