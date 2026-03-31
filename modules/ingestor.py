@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import uuid
 import logging
@@ -294,19 +295,23 @@ class WindBellIngestor:
         # Task 3: Ingestion Tagging (Core System Identification)
         is_core = "Nlp_project" in file_name
 
-        # Simple Chunking
+        # Sentence-Aware Chunking with Overlap
         CHUNK_SIZE = 1000
-        chunks = [text[i:i+CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
+        CHUNK_OVERLAP = 150  # Character overlap between chunks for context continuity
+        chunks = self._sentence_aware_chunk(text, CHUNK_SIZE, CHUNK_OVERLAP)
         
-        logger.info(f"Split into {len(chunks)} chunks. Processing...")
+        logger.info(f"Split into {len(chunks)} chunks (sentence-aware, overlap={CHUNK_OVERLAP}). Processing...")
 
         total_entities = 0
+        
+        # Track character offsets for page mapping
+        chunk_offsets = self._compute_chunk_offsets(text, chunks)
         
         for idx, chunk in enumerate(chunks):
             chunk_id = str(uuid.uuid4())
             
-            # Calculate page number for this chunk
-            char_offset = idx * CHUNK_SIZE
+            # Calculate page number for this chunk using actual offset
+            char_offset = chunk_offsets[idx] if idx < len(chunk_offsets) else 0
             page_number = self._get_page_for_offset(page_map, char_offset)
             
             # 1. Embed Chunk
@@ -319,11 +324,13 @@ class WindBellIngestor:
                 except Exception as e:
                     logger.error(f"Embedding failed: {e}")
             
+            # L2-normalize vector for cosine similarity via IndexFlatIP
+            vec_norm = np.linalg.norm(vector)
+            if vec_norm > 0:
+                vector = vector / vec_norm
+            
             # === TITANS: Surprise Check ===
             is_surprising = self._check_surprise(vector, chunk)
-            
-            # Calculate page number
-            page_number = self._get_page_for_offset(page_map, char_offset)
             
             if not is_surprising:
                 # Redundant content - skip entity extraction to prevent graph bloat
@@ -392,3 +399,109 @@ class WindBellIngestor:
         logger.info("[Ingestor] Triggering auto-save for persistence...")
         self.memory.save_snapshot()
         logger.info("[Ingestor] Auto-save complete. Data is now persistent.")
+
+    def _sentence_aware_chunk(self, text: str, chunk_size: int, overlap: int) -> List[str]:
+        """
+        Split text into chunks that respect sentence boundaries with overlap.
+        
+        Strategy:
+        1. Split the text into individual sentences using regex.
+        2. Accumulate sentences into chunks up to chunk_size.
+        3. When a chunk is full, finalize it and start the next chunk
+           with overlap from the end of the previous chunk.
+        
+        Args:
+            text: Full document text
+            chunk_size: Target maximum chunk size in characters
+            overlap: Number of characters of overlap between consecutive chunks
+            
+        Returns:
+            List of text chunks with sentence-aware boundaries
+        """
+        if not text or not text.strip():
+            return []
+        
+        # Split into sentences using regex (handles '.', '!', '?', and common abbreviations)
+        # This regex splits after sentence-ending punctuation followed by whitespace
+        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        if not sentences:
+            return [text.strip()] if text.strip() else []
+        
+        chunks = []
+        current_chunk_sentences = []
+        current_length = 0
+        
+        for sentence in sentences:
+            sentence_len = len(sentence)
+            
+            # If a single sentence exceeds chunk_size, add it as its own chunk
+            if sentence_len > chunk_size:
+                # Finalize current chunk if non-empty
+                if current_chunk_sentences:
+                    chunks.append(' '.join(current_chunk_sentences))
+                    current_chunk_sentences = []
+                    current_length = 0
+                chunks.append(sentence)
+                continue
+            
+            # Check if adding this sentence would exceed chunk_size
+            new_length = current_length + sentence_len + (1 if current_chunk_sentences else 0)
+            
+            if new_length > chunk_size and current_chunk_sentences:
+                # Finalize the current chunk
+                chunk_text = ' '.join(current_chunk_sentences)
+                chunks.append(chunk_text)
+                
+                # Start next chunk with overlap sentences from the end of the current chunk
+                overlap_sentences = []
+                overlap_length = 0
+                for s in reversed(current_chunk_sentences):
+                    if overlap_length + len(s) + (1 if overlap_sentences else 0) <= overlap:
+                        overlap_sentences.insert(0, s)
+                        overlap_length += len(s) + (1 if len(overlap_sentences) > 1 else 0)
+                    else:
+                        break
+                
+                current_chunk_sentences = overlap_sentences
+                current_length = sum(len(s) for s in current_chunk_sentences) + max(0, len(current_chunk_sentences) - 1)
+            
+            current_chunk_sentences.append(sentence)
+            current_length += sentence_len + (1 if len(current_chunk_sentences) > 1 else 0)
+        
+        # Don't forget the last chunk
+        if current_chunk_sentences:
+            chunks.append(' '.join(current_chunk_sentences))
+        
+        return chunks
+
+    def _compute_chunk_offsets(self, original_text: str, chunks: List[str]) -> List[int]:
+        """
+        Compute the character offset of each chunk in the original text.
+        Used for accurate page number mapping.
+        
+        Args:
+            original_text: The full document text
+            chunks: List of text chunks
+            
+        Returns:
+            List of character offsets (one per chunk)
+        """
+        offsets = []
+        search_start = 0
+        
+        for chunk in chunks:
+            # Find the first sentence of the chunk in the original text
+            # Use the first 100 chars as a search key to handle overlap
+            search_key = chunk[:min(100, len(chunk))]
+            idx = original_text.find(search_key, max(0, search_start - 200))
+            
+            if idx != -1:
+                offsets.append(idx)
+                search_start = idx + len(chunk) // 2  # Move forward past half the chunk
+            else:
+                # Fallback: estimate based on previous offset
+                offsets.append(search_start)
+        
+        return offsets

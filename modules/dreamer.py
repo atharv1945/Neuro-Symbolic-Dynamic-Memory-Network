@@ -215,12 +215,11 @@ class MemoryDreamer(threading.Thread):
             # but memory_store wraps it in self.lock)
             results = self.memory.query_similarity(source_vec, top_k=5)
             
-            for target_uuid, dist in results:
+            for target_uuid, similarity in results:
                 if target_uuid == source_uuid: continue
                 
-                # Convert L2 distance to similarity (FAISS IndexFlatL2 returns L2^2)
-                # For normalized vectors, sim = 1 - (dist / 2)
-                similarity = 1.0 - (dist / 2.0)
+                # IndexFlatIP with normalized vectors returns cosine similarity directly
+                # No conversion needed — higher score = more similar
                 
                 if similarity >= self.similarity_gate:
                     # 3. Check graph and add edge (FINE-GRAINED LOCKING)

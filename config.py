@@ -26,7 +26,7 @@ EMBEDDING_DIM = 384
 ENTROPY_DECAY_RATE = 0.1     # Point deduction per hour
 PRUNING_THRESHOLD = 0.0      # Nodes with energy <= 0 are removed
 SIMILARITY_THRESHOLD = 75    # rapidfuzz ratio for merging
-COMPRESSION_TARGET_TOKENS = 1000
+COMPRESSION_TARGET_TOKENS = 1800
 
 # --- Titans-Inspired Constants ---
 SURPRISE_THRESHOLD = 0.92      # Similarity > 0.92 = redundant (skip entity extraction)

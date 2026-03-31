@@ -38,8 +38,9 @@ class SharedMemoryManager:
         self.graph = nx.Graph()
         self.vectors = {} # uuid -> np.ndarray
         
-        # FAISS Setup (CPU Force)
-        self.index = faiss.IndexIDMap(faiss.IndexFlatL2(self.embedding_dim))
+        # FAISS Setup (CPU Force) - Using Inner Product for cosine similarity
+        # Vectors MUST be L2-normalized before insertion for IP to equal cosine similarity
+        self.index = faiss.IndexIDMap(faiss.IndexFlatIP(self.embedding_dim))
         
         self._load_state()
 
@@ -147,6 +148,7 @@ class SharedMemoryManager:
     def add_memory(self, uuid: str, text: str, vector: np.ndarray, metadata: dict = None):
         """
         Atomically adds a node to Graph and Vector Store.
+        Vectors are L2-normalized before FAISS insertion to ensure IndexFlatIP = cosine similarity.
         """
         # Ensure numpy array
         if not isinstance(vector, np.ndarray):
@@ -154,13 +156,18 @@ class SharedMemoryManager:
             
         vector = vector.reshape(1, -1).astype('float32')
         
+        # L2-normalize for cosine similarity via IndexFlatIP
+        norm = np.linalg.norm(vector)
+        if norm > 0:
+            vector = vector / norm
+        
         with self.lock:
             try:
                 # 1. Assign ID
                 current_id = self.next_id
                 self.next_id += 1
                 
-                # 2. Add to FAISS
+                # 2. Add to FAISS (vector is already normalized)
                 self.index.add_with_ids(vector, np.array([current_id]).astype('int64'))
                 
                 # 3. Add to Graph
@@ -203,23 +210,31 @@ class SharedMemoryManager:
                 
     def query_similarity(self, vector: np.ndarray, top_k: int = 5):
         """
-        Returns a list of (uuid, distance) tuples.
+        Returns a list of (uuid, similarity_score) tuples.
+        Scores are cosine similarity values in [0, 1] (higher = more similar).
         """
         # Ensure numpy array
         if not isinstance(vector, np.ndarray):
             vector = np.array(vector)
 
         vector = vector.reshape(1, -1).astype('float32')
+        
+        # L2-normalize query vector for cosine similarity via IndexFlatIP
+        norm = np.linalg.norm(vector)
+        if norm > 0:
+            vector = vector / norm
+        
         with self.lock:
             if self.index.ntotal == 0:
                 return []
             
-            distances, ids = self.index.search(vector, top_k)
+            # IndexFlatIP returns inner product scores (= cosine sim for normalized vectors)
+            scores, ids = self.index.search(vector, top_k)
             
             results = []
-            for dist, internal_id in zip(distances[0], ids[0]):
+            for score, internal_id in zip(scores[0], ids[0]):
                 if internal_id != -1 and internal_id in self.id_to_uuid:
-                    results.append((self.id_to_uuid[internal_id], float(dist)))
+                    results.append((self.id_to_uuid[internal_id], float(score)))
             
             return results
 

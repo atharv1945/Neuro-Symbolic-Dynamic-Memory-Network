@@ -288,26 +288,78 @@ class NeuralBrain:
         return final_docs
 
 
+    @staticmethod
+    def _sentence_aware_truncate(text: str, max_chars: int = 3000) -> str:
+        """Truncate text at the last sentence boundary within max_chars."""
+        if len(text) <= max_chars:
+            return text
+        
+        truncated = text[:max_chars]
+        # Find the last sentence-ending punctuation
+        last_period = truncated.rfind('.')
+        last_question = truncated.rfind('?')
+        last_exclaim = truncated.rfind('!')
+        last_boundary = max(last_period, last_question, last_exclaim)
+        
+        if last_boundary > max_chars * 0.5:
+            # Only use sentence boundary if it's in the latter half
+            return truncated[:last_boundary + 1]
+        else:
+            # If no good boundary, truncate at last space to avoid broken words
+            last_space = truncated.rfind(' ')
+            if last_space > 0:
+                return truncated[:last_space] + "..."
+            return truncated
+
     def compress_context(self, context: List[str], query: str) -> str:
         if not context:
             return ""
         
         full_text = "\n\n".join(context)
+        raw_length = len(full_text)
+        
+        # --- Diagnostic: Raw context ---
+        logger.info(f"[Compression] Raw context length: {raw_length} chars, {len(context)} docs")
+        print(f"\n[Step9 Debug] Raw context length: {raw_length} chars ({len(context)} docs)")
+        print(f"[Step9 Debug] Raw context sample (first 300 chars):\n{full_text[:300]}\n---")
+        
+        # --- Safeguard: Skip compression if context is already small ---
+        # Rough estimate: 1 token ≈ 4 chars. If already under budget, skip compression.
+        estimated_tokens = raw_length // 4
+        if estimated_tokens <= COMPRESSION_TARGET_TOKENS:
+            logger.info(f"[Compression] Context already small (~{estimated_tokens} tokens <= {COMPRESSION_TARGET_TOKENS} target). Skipping compression.")
+            print(f"[Step9 Debug] Context small enough (~{estimated_tokens} tokens). Skipping compression.")
+            return full_text
         
         if self.compressor:
             try:
                 compressed_res = self.compressor.compress_prompt(
                     context=context,
                     question=query,
-                    rate=0.5,
+                    rate=0.75,  # Step 9: reduced aggressiveness (was 0.5)
                     target_token=COMPRESSION_TARGET_TOKENS
                 )
-                return compressed_res['compressed_prompt']
+                compressed_text = compressed_res['compressed_prompt']
+                compressed_length = len(compressed_text)
+                
+                # --- Diagnostic: Compressed context ---
+                logger.info(f"[Compression] Compressed: {raw_length} -> {compressed_length} chars (ratio: {compressed_length/raw_length:.2f})")
+                print(f"[Step9 Debug] Compressed context length: {compressed_length} chars (ratio: {compressed_length/raw_length:.2f})")
+                print(f"[Step9 Debug] Compressed context sample (first 300 chars):\n{compressed_text[:300]}\n---")
+                
+                return compressed_text
             except Exception as e:
                 logger.error(f"Compression failed: {e}")
-                return full_text[:2000]
+                # Sentence-aware fallback instead of naive truncation
+                fallback = self._sentence_aware_truncate(full_text, max_chars=3000)
+                print(f"[Step9 Debug] Compression failed, using sentence-aware fallback ({len(fallback)} chars)")
+                return fallback
         else:
-            return full_text[:2000]
+            # No compressor available: sentence-aware truncation
+            fallback = self._sentence_aware_truncate(full_text, max_chars=3000)
+            logger.info(f"[Compression] No compressor. Sentence-aware truncation: {raw_length} -> {len(fallback)} chars")
+            print(f"[Step9 Debug] No compressor. Sentence-aware truncation: {raw_length} -> {len(fallback)} chars")
+            return fallback
 
     def process_query(self, query: str) -> str:
         if not self.check_safety(query):
